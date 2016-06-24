@@ -1,0 +1,118 @@
+#!/system/bin/sh
+###
+##  Android chroot script helper
+###
+##  Made by: Adrian Pistol (aka vifino)
+##  License: WTFPL
+###
+
+##
+#  Variables
+##
+
+# Tweakables
+CHROOT_PART=/data # The partition the chroot is located on, like /data
+CHROOT_DIR=/data/local/chroot # Chroot directory
+CHROOT_CMD='/usr/bin/bash -l' # Command which gets run if $@ isn't containing an alternative command.
+
+BUSYBOX=$(which busybox) # You shouldn't need to change this
+
+# Internal
+_VERSION=0.0.1
+COL_GREEN='\033[0;32m'
+COL_YELLOW='\033[1;33m'
+COL_RED='\033{0;31m'
+COL_RESET="\033[0m" # No Color
+
+##
+#  Logic
+##
+
+## Funcs
+# Generic
+matches() {
+	builtin echo "$1" | $BUSYBOX egrep -q "$2"	
+}
+
+# Command execution and logging
+log() {
+	case "$1" in
+		info) builtin echo -e "\033[0;32mINFO\033[0m: $2";;
+		warn) builtin echo -e "\033[0;33mWARN\033[0m: $2";;
+		fail) builtin echo -e "\033[1;31mFAIL\033[0m: $2" && exit $3;;
+	esac
+}
+cmd() {
+	echo "\$ $@"
+	"$@"
+	STATUS=$?
+	if [ $STATUS -ne 0 ]; then
+		log fail "Command failed: $(echo "$@")" $STATUS
+	fi
+}
+
+# Mount specific funcs
+mount() {
+	"$BUSYBOX" mount "$@"
+	return $?
+}
+bmount() {
+	from="$1"
+	to="$2"
+	[ -d "$CHROOT_DIR$to" ] || mkdir -p "$CHROOT_DIR$to"
+	cmd mount -o bind "$from" "$CHROOT_DIR$to"
+}
+mounted() {
+	for mountpoint in "$@"
+	do
+		"$BUSYBOX" mountpoint -q "$CHROOT_DIR$mountpoint"
+		status=$?
+		[ $status -ne 0 ] && return $status
+	done
+	return 0
+}
+
+log info "achroot version $_VERSION"
+
+# Check if the chroot directory even exists...
+if [ ! -d "$CHROOT_DIR" ]; then
+	log fail "The chroot directory at $CHROOT_DIR does not exist. Aborting..." 1
+fi
+
+# Figure out mount options
+PART_MOUNT_OPTS=$(cat /proc/mounts | grep " $CHROOT_PART " | awk '{ print $4}')
+if matches "$PART_MOUNT_OPTS" "noexec|nosuid"; then
+	log warn "$CHROOT_PART's mount options contain incompatible options, remounting..."
+	# Cleanup and remove noexec/nosuid/nodev options from the mount options followed by...
+	MODDED_MOUNT_OPTS=$(echo "$PART_MOUNT_OPTS" | sed \
+		-e 's/ //g' \
+		-e 's/,noexec//' \
+		-e 's/noexec,//' \
+		-e 's/,nosuid//' \
+		-e 's/nosuid,//' \
+	)
+	# remounting the partition!
+	cmd mount -o "remount,$MODDED_MOUNT_OPTS,exec,suid,dev" "$CHROOT_PART"
+	log info "Remounted!"
+fi
+
+# After the above, the partition containing the chroot has been successfully remounted with
+# options compatible with running a chroot on top of.
+#
+# Now, all we have to do is bind-mount the required paths if they aren't yet and chroot.
+
+log info "Checking if anything needs to be mounted..."
+
+mounted "/proc" || cmd mount -t proc proc "$CHROOT_DIR/proc"
+mounted "/dev" || bmount /dev /dev
+mounted "/dev/pts" || bmount /dev/pts /dev/pts
+mounted "/mnt/sdcard" || bmount /sdcard /mnt/sdcard
+
+log info "Done mounting. Ready."
+
+# Chroot!!!
+if [ $# -ne 0 ]; then # got arguments
+	exec "$BUSYBOX" chroot "$CHROOT_DIR" "$@"
+else
+	exec "$BUSYBOX" chroot "$CHROOT_DIR" $CHROOT_CMD # Last arg must be unsafely interpreted, otherwise you can't have cmd arguments, which sucks.
+fi
